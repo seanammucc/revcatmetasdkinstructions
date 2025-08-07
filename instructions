@@ -1,0 +1,196 @@
+## Guide: Setting Up Meta Ads Attribution with RevenueCat in React Native
+
+This documentation walks you through the entire process of configuring your React Native app to track in-app purchases driven by Meta (Facebook) Ad campaigns. By the end, you will be able to see subscription and purchase events in your Meta Ads Manager, attributed correctly to your ad campaigns.
+
+### Prerequisites
+
+Before you begin, ensure you have the following:
+
+*   A working React Native project.
+*   An active RevenueCat account with your app configured.
+*   An active Meta Developer account with an app created.
+*   An active Meta Ads Manager account.
+*   Your app's bundle ID (for iOS) and package name (for Android) registered in both the RevenueCat and Meta dashboards.
+
+---
+
+### Phase 1: Configure Your React Native App
+
+This phase involves installing the necessary packages and writing the code to handle attribution logic.
+
+#### Step 1: Install Dependencies
+
+First, ensure you have the required packages installed in your project:
+
+```bash
+npm install react-native-purchases react-native-fbsdk-next expo-tracking-transparency
+```
+
+#### Step 2: Configure Expo Plugins (`app.json`)
+
+You need to add the `react-native-fbsdk-next` and `expo-tracking-transparency` plugins to your `app.json` file. This allows Expo to link the native dependencies correctly during the build process.
+
+```json
+{
+  "expo": {
+    "plugins": [
+      [
+        "react-native-fbsdk-next",
+        {
+          "appID": "YOUR_META_APP_ID",
+          "clientToken": "YOUR_META_CLIENT_TOKEN",
+          "displayName": "Your App Name",
+          "scheme": "fbYOUR_META_APP_ID"
+        }
+      ],
+      "expo-tracking-transparency"
+    ]
+  }
+}
+```
+
+**Important:**
+*   Replace `YOUR_META_APP_ID` and `YOUR_META_CLIENT_TOKEN` with the actual values from your Meta Developer dashboard.
+*   The `scheme` must start with `fb`.
+
+#### Step 3: Initialize SDKs in `App.js`
+
+At the top level of your main application file (e.g., `App.js`), initialize both the RevenueCat and Facebook SDKs. This ensures they are configured once when the app starts.
+
+```javascript
+// ... imports
+import { Platform } from 'react-native';
+import Purchases from 'react-native-purchases';
+import { Settings } from 'react-native-fbsdk-next';
+
+// Configure RevenueCat SDK
+// This should only be done once in your app's lifecycle
+if (Platform.OS === 'ios') {
+  Purchases.configure({ apiKey: 'YOUR_IOS_REVENUECAT_API_KEY' });
+} else if (Platform.OS === 'android') {
+  // Purchases.configure({ apiKey: 'YOUR_GOOGLE_REVENUECAT_API_KEY' });
+}
+
+// ...
+export default function App() {
+  // ...
+  useEffect(() => {
+    // Initialize the Facebook SDK
+    Settings.initializeSDK();
+
+    // ... other setup logic like checking onboarding status
+  }, []);
+
+  // ... rest of your App component
+}
+```
+
+#### Step 4: Implement the App Tracking Transparency (ATT) Flow
+
+You must ask for user permission *before* collecting device identifiers. The correct flow is to request permission, wait for the user's response, and then collect the identifiers if permission is granted.
+
+```javascript
+// ... imports
+import { requestTrackingPermissionsAsync } from 'expo-tracking-transparency';
+import { AppEventsLogger } from 'react-native-fbsdk-next';
+
+
+export default function App() {
+  // ... other state variables
+  const [attStatus, setAttStatus] = useState(null);
+
+  // ... other useEffect hooks
+
+  // Effect to request ATT permission on mount
+  useEffect(() => {
+    const requestATT = async () => {
+      if (Platform.OS === 'ios') {
+        const { status } = await requestTrackingPermissionsAsync();
+        setAttStatus(status);
+        console.log('ATT Permission Status:', status);
+      }
+    };
+
+    requestATT();
+  }, []);
+
+  // Effect to configure RevenueCat attribution after ATT status is known
+  useEffect(() => {
+    const configureRevenueCatAttribution = async () => {
+      try {
+        // Collect standard device identifiers
+        Purchases.collectDeviceIdentifiers();
+        
+        // Get the Facebook anonymous ID and send it to RevenueCat
+        const anonymousId = await AppEventsLogger.getAnonymousID();
+        if (anonymousId) {
+          Purchases.setFBAnonymousID(anonymousId);
+        }
+        console.log('RevenueCat attribution configured successfully.');
+      } catch (e) {
+        console.log('Error configuring RevenueCat attribution', e);
+      }
+    };
+
+    if (attStatus === 'granted') {
+      configureRevenueCatAttribution();
+    }
+  }, [attStatus]);
+
+  // ... rest of your App component
+}
+```
+
+#### Step 5: Rebuild Your App
+
+After adding new plugins and native code, you must rebuild your app's native directories.
+
+```bash
+npx expo prebuild --clean
+# Or run on a device/simulator
+npx expo run:ios
+```
+
+---
+
+### Phase 2: Configure Meta and RevenueCat Dashboards
+
+With the app code in place, you now need to configure the services to talk to each other.
+
+#### Step 1: Disable Meta's Automatic Purchase Tracking
+
+This is a **critical step** to prevent revenue from being counted twice (once by Meta's SDK and once by RevenueCat).
+
+1.  Go to your app in the [Meta for Developers](https://developers.facebook.com/apps/) dashboard.
+2.  Navigate to **Settings** -> **Platform**.
+3.  Find the iOS or Android card.
+4.  Set **Log In-App Events Automatically** to **No**.
+
+#### Step 2: Set Up the Meta Ads Integration in RevenueCat
+
+1.  Log in to your [RevenueCat dashboard](https://app.revenuecat.com/).
+2.  Navigate to your project, then click **Integrations** from the menu on the left.
+3.  Select **Meta Ads** from the list of available integrations.
+4.  Choose the **Conversions API** option (recommended for reliability).
+5.  You will be asked for a **Datasource ID** and a **Client Token**. You can find these in your **Meta Events Manager** under your data source's **Settings** tab.
+6.  Review the event names. It is recommended to use the defaults (e.g., `StartTrial`, `Subscribe`) for best results with Meta's campaign optimization.
+7.  Click **Save**.
+
+---
+
+### Phase 3: Test and Verify the Integration
+
+Finally, test the entire flow to ensure everything is working correctly.
+
+1.  **Run the app** on a physical iOS device.
+2.  When the **App Tracking Transparency** dialog appears, tap **Allow**.
+3.  Complete a **sandbox purchase** in your app.
+4.  **Check RevenueCat:**
+    *   Navigate to the **Customer History** for your test user in the RevenueCat dashboard.
+    *   Find the purchase event. Under the **Attributes** section, you should now see `$idfa`, `$idfv`, and `$fb_anonymous_id`.
+    *   Click on the purchase event. You should see an entry for the **Meta Ads** integration with a "Delivered" status. You can inspect the request body here to confirm the data being sent.
+5.  **Check Meta Events Manager:**
+    *   Navigate to your **Meta Events Manager**.
+    *   You should see the corresponding event (e.g., `Subscribe`) appear. **Note:** This can take up to 24 hours to show up.
+
+Once you have verified that events are appearing in both dashboards, your setup is complete. You can now use the Ads Manager to track the performance of your campaigns based on real in-app purchase data. 
