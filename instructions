@@ -85,7 +85,51 @@ export default function App() {
 }
 ```
 
-#### Step 4: Implement the App Tracking Transparency (ATT) Flow
+#### Step 4: Manually Log App Install Event
+
+Because automatic event logging will be disabled to support the RevenueCat integration, you must manually log an event to track app installs. This ensures that Meta can attribute installs to your ad campaigns.
+
+The best place to do this is on the app's first launch. The code below logs the standard `ActivatedApp` event when it detects that the user has not yet completed the onboarding flow.
+
+```javascript
+// In App.js
+
+// ... imports
+import { Settings, AppEventsLogger, AppEvents } from 'react-native-fbsdk-next';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+
+// ...
+
+export default function App() {
+  // ...
+  useEffect(() => {
+    // ...
+    const checkOnboardingStatus = async () => {
+      try {
+        const onboardingCompleted = await AsyncStorage.getItem('app_onboarding_completed');
+        if (onboardingCompleted !== 'true') {
+          // Manually log the 'app activate' event. This is necessary because
+          // automatic event logging is disabled to prevent duplicate purchase events.
+          // This event is used by Meta to attribute app installs to ad campaigns.
+          AppEventsLogger.logEvent(AppEvents.ActivatedApp);
+          
+          setShowAppOnboarding(true);
+        }
+      } catch (error) {
+        console.error("Error reading app onboarding status:", error);
+        setShowAppOnboarding(true);
+      } finally {
+        setIsLoadingOnboardingStatus(false);
+      }
+    };
+    checkOnboardingStatus();
+  }, []);
+  //...
+}
+```
+
+#### Step 5: Implement the App Tracking Transparency (ATT) Flow
 
 You must ask for user permission *before* collecting device identifiers. The correct flow is to request permission, wait for the user's response, and then collect the identifiers if permission is granted.
 
@@ -141,7 +185,7 @@ export default function App() {
 }
 ```
 
-#### Step 5: Rebuild Your App
+#### Step 6: Rebuild Your App
 
 After adding new plugins and native code, you must rebuild your app's native directories.
 
