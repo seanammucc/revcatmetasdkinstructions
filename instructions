@@ -53,110 +53,82 @@ You need to add the `react-native-fbsdk-next` and `expo-tracking-transparency` p
 *   Replace `YOUR_META_APP_ID` and `YOUR_META_CLIENT_TOKEN` with the actual values from your Meta Developer dashboard.
 *   The `scheme` must start with `fb`.
 
-#### Step 3: Initialize SDKs in `App.js`
+#### Step 3: Handle App Launch, ATT, and Install Event
 
-At the top level of your main application file (e.g., `App.js`), initialize both the RevenueCat and Facebook SDKs. This ensures they are configured once when the app starts.
+To prevent race conditions and ensure data is sent correctly, the app's startup logic must follow a strict order:
+1.  Request App Tracking Transparency (ATT) permission from the user.
+2.  Wait for the user to respond.
+3.  Initialize the Meta SDK. The SDK will automatically use the permission status you just received.
+4.  Log the install event (`fb_mobile_activate_app`).
+
+The following `useEffect` hook in your `App.js` correctly handles this entire sequence. This replaces the need for separate hooks for initialization and event logging.
 
 ```javascript
+// In App.js
+
 // ... imports
 import { Platform } from 'react-native';
 import Purchases from 'react-native-purchases';
-import { Settings } from 'react-native-fbsdk-next';
-
-// Configure RevenueCat SDK
-// This should only be done once in your app's lifecycle
-if (Platform.OS === 'ios') {
-  Purchases.configure({ apiKey: 'YOUR_IOS_REVENUECAT_API_KEY' });
-} else if (Platform.OS === 'android') {
-  // Purchases.configure({ apiKey: 'YOUR_GOOGLE_REVENUECAT_API_KEY' });
-}
+import { Settings, AppEventsLogger } from 'react-native-fbsdk-next';
+import { requestTrackingPermissionsAsync } from 'expo-tracking-transparency';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // ...
-export default function App() {
-  // ...
-  useEffect(() => {
-    // Initialize the Facebook SDK
-    Settings.initializeSDK();
 
-    // ... other setup logic like checking onboarding status
+export default function App() {
+  // ... state variables for onboarding, etc.
+  const [attStatus, setAttStatus] = useState(null);
+  const [isLoadingOnboardingStatus, setIsLoadingOnboardingStatus] = useState(true);
+  const [showAppOnboarding, setShowAppOnboarding] = useState(false);
+
+  // Handles the entire app launch sequence in the correct order
+  useEffect(() => {
+    const handleAppLaunchSequence = async () => {
+      try {
+        // 1. Request ATT permission and wait for the user's response.
+        if (Platform.OS === 'ios') {
+          const { status } = await requestTrackingPermissionsAsync();
+          setAttStatus(status);
+          console.log('ATT Permission Status:', status);
+        }
+
+        // 2. Initialize the Meta SDK. It will now automatically use the ATT status.
+        Settings.initializeSDK();
+
+        // 3. Check onboarding status and log the install event if necessary.
+        const onboardingCompleted = await AsyncStorage.getItem('app_onboarding_completed');
+        if (onboardingCompleted !== 'true') {
+          setShowAppOnboarding(true);
+          // This event is now logged *after* permission has been determined.
+          console.log("Attempting to log app install event to Meta...");
+          AppEventsLogger.logEvent('fb_mobile_activate_app');
+          console.log("Successfully logged app install event to Meta.");
+        }
+      } catch (error) {
+        console.error("Error during app launch sequence:", error);
+        setShowAppOnboarding(true); // Show onboarding on error to be safe
+      } finally {
+        setIsLoadingOnboardingStatus(false);
+      }
+    };
+
+    handleAppLaunchSequence();
   }, []);
 
   // ... rest of your App component
 }
 ```
 
-#### Step 4: Manually Log App Install Event
+#### Step 4: Configure RevenueCat Attribution
 
-Because automatic event logging will be disabled to support the RevenueCat integration, you must manually log an event to track app installs. This ensures that Meta can attribute installs to your ad campaigns.
-
-The best place to do this is on the app's first launch. The code below logs the standard `ActivatedApp` event when it detects that the user has not yet completed the onboarding flow.
+After the user has responded to the ATT prompt, you can proceed with configuring RevenueCat's attribution. This should be done in a separate `useEffect` that listens for changes to the `attStatus`.
 
 ```javascript
 // In App.js
-
-// ... imports
-import { Settings, AppEventsLogger, AppEvents } from 'react-native-fbsdk-next';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-
-
 // ...
 
 export default function App() {
-  // ...
-  useEffect(() => {
-    // ...
-    const checkOnboardingStatus = async () => {
-      try {
-        const onboardingCompleted = await AsyncStorage.getItem('app_onboarding_completed');
-        if (onboardingCompleted !== 'true') {
-          // Manually log the 'app activate' event. This is necessary because
-          // automatic event logging is disabled to prevent duplicate purchase events.
-          // This event is used by Meta to attribute app installs to ad campaigns.
-          AppEventsLogger.logEvent(AppEvents.ActivatedApp);
-          
-          setShowAppOnboarding(true);
-        }
-      } catch (error) {
-        console.error("Error reading app onboarding status:", error);
-        setShowAppOnboarding(true);
-      } finally {
-        setIsLoadingOnboardingStatus(false);
-      }
-    };
-    checkOnboardingStatus();
-  }, []);
-  //...
-}
-```
-
-#### Step 5: Implement the App Tracking Transparency (ATT) Flow
-
-You must ask for user permission *before* collecting device identifiers. The correct flow is to request permission, wait for the user's response, and then collect the identifiers if permission is granted.
-
-```javascript
-// ... imports
-import { requestTrackingPermissionsAsync } from 'expo-tracking-transparency';
-import { AppEventsLogger } from 'react-native-fbsdk-next';
-
-
-export default function App() {
-  // ... other state variables
-  const [attStatus, setAttStatus] = useState(null);
-
-  // ... other useEffect hooks
-
-  // Effect to request ATT permission on mount
-  useEffect(() => {
-    const requestATT = async () => {
-      if (Platform.OS === 'ios') {
-        const { status } = await requestTrackingPermissionsAsync();
-        setAttStatus(status);
-        console.log('ATT Permission Status:', status);
-      }
-    };
-
-    requestATT();
-  }, []);
+  // ... other hooks from the previous step
 
   // Effect to configure RevenueCat attribution after ATT status is known
   useEffect(() => {
@@ -176,6 +148,7 @@ export default function App() {
       }
     };
 
+    // Only configure if permission was granted
     if (attStatus === 'granted') {
       configureRevenueCatAttribution();
     }
@@ -185,7 +158,7 @@ export default function App() {
 }
 ```
 
-#### Step 6: Rebuild Your App
+#### Step 5: Rebuild Your App
 
 After adding new plugins and native code, you must rebuild your app's native directories.
 
